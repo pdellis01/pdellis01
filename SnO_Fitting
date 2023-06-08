@@ -1,0 +1,122 @@
+from doctest import master
+from gettext import ngettext
+import locale
+import csdmpy as cp
+import matplotlib.pyplot as plt
+from lmfit import Minimizer
+from mrsimulator.spin_system.site import SymmetricTensor
+import nmrglue as ng
+from mrsimulator import Site, SpectralDimension, SpinSystem, Simulator, spin_system
+from mrsimulator.method.lib import BlochDecaySpectrum
+from mrsimulator import signal_processor as sp
+from mrsimulator.utils import spectral_fitting as sf
+from mrsimulator.method import SpectralDimension
+from mrsimulator.utils import get_spectral_dimensions
+
+# initialize nmrglue converter object 
+
+ax = plt.subplot(projection="csdm")
+# read in the JEOL dataset file
+
+experiment = cp.load ("/Users/pdellis/Desktop/mrsim_fit/SnO_Transformed.csdf") 
+fig, ax = plt.subplots(1, 2, figsize=(9, 3.5), subplot_kw={"projection": "csdm"})
+
+ax[0].plot(experiment.real)
+ax[0].set_title("Full Spectrum")
+ax[0].grid()
+ax[1].plot(experiment.real,color= "red", label="real")
+ax[1].set_title("Zoomed Spectrum")
+ax[1].set_xlim(1.4e6, 1.8e6)
+ax[1].grid()
+plt.tight_layout()
+plt.legend()
+plt.show()
+
+# standard deviation of noise from the dataset
+sigma = 0.6410905
+
+Tin_119 = Site(
+    isotope = "119Sn",
+    isotropic_chemical_shift = 1.6e6,
+    shielding_symmetric = SymmetricTensor(zeta = 1.8e5,eta = 0.0)
+
+    )
+
+Dict = {'origin_offset': 'Hz', 'reference_offset': 'Hz', 'spectral_width': 'Hz', 'reference_offset': 'Hz', 'origin_offset': 'Hz'},
+spectral_dims = get_spectral_dimensions(experiment)
+bloch = BlochDecaySpectrum(
+    channels = ["119Sn"],
+    magnetic_flux_density = 11.75,  # in T
+    rotor_angle = 0.9553234193716164, # in rad
+    rotor_frequency = 6600,  # in Hz  
+        spectral_dimensions = [
+            SpectralDimension(
+            count = 8192,
+            spectral_width = 2000000,  # in Hz
+        )
+        ],
+    experiment = experiment,  # add the measurement to the method
+    )
+
+# Use only the real part of the spectrum
+experiment = experiment.real
+sys = [SpinSystem(sites=[Tin_119]), ]
+
+sim = Simulator(spin_systems = sys, methods=[bloch])
+
+
+sim.config.decompose_spectrum = "spin_system"
+
+sim.run()
+
+relative_intensity_factor = experiment.max() / sim.methods[0].simulation.max()
+
+# Post Simulation Processing
+processor = sp.SignalProcessor(
+    operations=[
+        sp.IFFT(),
+        sp.apodization.Gaussian(FWHM="50 Hz"),
+        sp.FFT(),        
+        sp.Scale(factor=200)
+    ]
+)
+dataset = experiment
+processed_dataset = processor.apply_operations(dataset = sim.methods[0].simulation).real
+# Plot the spectrum
+plt.figure(figsize=(4.25, 3.0))
+ax = plt.subplot(projection="csdm")
+ax.plot(experiment, linewidth=1, label="Experiment")
+ax = plt.subplot(projection="csdm")
+ax.plot(processed_dataset, linewidth=1, label="Simulation")
+ax.set_xlim(1.4e6, 1.8e6)
+plt.grid()
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+params = sf.make_LMFIT_params(sim, processor, include={"rotor_frequency"})
+
+fit_parameters = sf.make_LMFIT_params(sim, processor)
+print(fit_parameters.pretty_print(columns=["value", "min", "max", "vary", "expr"]))
+
+# standard deviation of noise from the dataset
+from lmfit import Minimizer
+minner = Minimizer(sf.LMFIT_min_function, fit_parameters, fcn_args=(sim, processor, sigma))
+result = minner.minimize()
+result
+
+best_fit = sf.bestfit(sim, processor)[0].real
+residuals = sf.residuals(sim, processor)[0].real
+
+# Plot the spectrum
+plt.figure(figsize=(4.25, 3.0))
+ax = plt.subplot(projection="csdm")
+ax.plot(experiment, linewidth=1, label="Experiment")
+ax.plot(best_fit, linewidth=1, label="Best Fit")
+ax.plot(residuals, linewidth=1, label="Residuals")
+ax.set_xlim(1.4e6, 1.8e6)
+plt.grid()
+plt.legend()
+plt.tight_layout()
+plt.show()
